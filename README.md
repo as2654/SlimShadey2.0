@@ -40,7 +40,7 @@ Works on all operating systems, including mobile. Touch gestures provide panning
 
 ## Getting started
 
-You can use SlimShadey 2.0 by visiting [SlimShadey](SlimShadey.adsbio.net).
+You can use SlimShadey 2.0 by visiting [SlimShadey](https://slimshadey.adsbio.net).
 
 No build step is required. Clone the repository and open `index.html` in a browser, or serve the directory with any static file server.
 
