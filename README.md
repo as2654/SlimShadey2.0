@@ -2,7 +2,7 @@
 
 **A browser-based application for interactive visualization, annotation, and figure preparation of multiple sequence alignments.**
 
-SlimShadey 2.0 is a complete reimplementation of the original [SlimShadey](https://github.com/shaha65/slim-shadey) desktop application as a zero-installation web app. Alignments are rendered on the GPU via WebGL2, keeping panning, recoloring, and selection responsive regardless of alignment size. The program runs entirely client-side — no account, no server, no data ever leaves your machine.
+SlimShadey 2.0 is a complete reimplementation of the [original SlimShadey](https://github.com/shaha65/slim-shadey) desktop application as a zero-installation web app. Alignments are rendered on the GPU via WebGL2, keeping panning, recoloring, and selection responsive regardless of alignment size. The program runs entirely client-side — no account, no server, no data ever leaves your machine.
 
 **[Try it here](https://slimshadey.adsbio.net)**
 
