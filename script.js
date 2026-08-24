@@ -1389,6 +1389,7 @@ const VS_SOURCE = `#version 300 es
   out vec3 v_color;
   out float v_hover;
   out float v_col;
+  out float v_row;
   out vec2 v_texCoord;
   void main() {
     vec2 cellPixel = a_cellPos * u_cellSize - u_scroll;
@@ -1398,6 +1399,7 @@ const VS_SOURCE = `#version 300 es
     v_color = a_color;
     v_hover = a_hover;
     v_col = a_cellPos.x;
+    v_row = a_cellPos.y;
     float col = mod(a_glyphIndex, u_atlasGrid.x);
     float rowg = floor(a_glyphIndex / u_atlasGrid.x);
     vec2 glyphOrigin = vec2(col, rowg) / u_atlasGrid;
@@ -1410,9 +1412,11 @@ const FS_SOURCE = `#version 300 es
   in vec3 v_color;
   in float v_hover;
   in float v_col;
+  in float v_row;
   in vec2 v_texCoord;
   uniform sampler2D u_atlas;
   uniform float u_hoverCol;
+  uniform float u_hoverRow;
   uniform float u_luminance;
   uniform float u_selStart;
   uniform float u_selEnd;
@@ -1430,10 +1434,12 @@ const FS_SOURCE = `#version 300 es
   }
   void main() {
     float colHighlight = (u_hoverCol >= 0.0 && abs(v_col - u_hoverCol) < 0.5) ? 1.0 : 0.0;
+    float rowHighlight = (u_hoverRow >= 0.0 && abs(v_row - u_hoverRow) < 0.5) ? 1.0 : 0.0;
     float selActive = (u_selStart >= 0.0 && v_col >= u_selStart - 0.5 && v_col <= u_selEnd + 0.5) ? 1.0 : 0.0;
     vec3 hoverColor = vec3(0.55, 0.72, 1.0);
     vec3 bg = mix(v_color, hoverColor, 0.45 * v_hover);
     bg = mix(bg, hoverColor, 0.25 * colHighlight);
+    bg = mix(bg, hoverColor, 0.25 * rowHighlight);
     vec3 selectColor = vec3(0.01, 0.99, 0.01);
     bg = mix(bg, selectColor, 0.26 * selActive);
     vec4 glyph = texture(u_atlas, v_texCoord);
@@ -1505,6 +1511,7 @@ function compileMsaProgram(gl) {
     atlasGrid: gl.getUniformLocation(prog, "u_atlasGrid"),
     atlasSampler: gl.getUniformLocation(prog, "u_atlas"),
     hoverCol: gl.getUniformLocation(prog, "u_hoverCol"),
+    hoverRow: gl.getUniformLocation(prog, "u_hoverRow"),
     luminance: gl.getUniformLocation(prog, "u_luminance"),
     selStart: gl.getUniformLocation(prog, "u_selStart"),
     selEnd: gl.getUniformLocation(prog, "u_selEnd")
@@ -1512,6 +1519,7 @@ function compileMsaProgram(gl) {
   gl.uniform2f(uni.atlasGrid, GLYPH_ATLAS.cols, GLYPH_ATLAS.rows);
   gl.uniform1i(uni.atlasSampler, 0);
   gl.uniform1f(uni.hoverCol, -1);
+  gl.uniform1f(uni.hoverRow, -1);
   gl.uniform1f(uni.selStart, -1);
   gl.uniform1f(uni.selEnd, -1);
 
@@ -1555,7 +1563,18 @@ function mkMenuItem(label, onClick, disabled = false) {
   if (!disabled) item.addEventListener("click", onClick);
   return item;
 }
-function showColumnContextMenu(x, y, lo, hi, onDelete, onGenerateLogo, onExport, onClearSelection) {
+function showColumnContextMenu(
+  x,
+  y,
+  lo,
+  hi,
+  onDelete,
+  onAnnotate,
+  onBlockShade,
+  onGenerateLogo,
+  onExport,
+  onClearSelection
+) {
   closeContextMenu();
   window._activeContextMenuClearSelection = onClearSelection;
   const menu = document.createElement("div");
@@ -1573,6 +1592,22 @@ function showColumnContextMenu(x, y, lo, hi, onDelete, onGenerateLogo, onExport,
       const ok = confirm(`Delete columns ${lo}-${hi}? This cannot be undone.`);
       if (ok) onDelete(lo, hi);
       closeContextMenu();
+    })
+  );
+
+  menu.appendChild(
+    mkMenuItem("Annotate selection", () => {
+      window._activeContextMenuClearSelection = null; // keep the selection visible while the modal is open
+      closeContextMenu();
+      onAnnotate(lo, hi, onClearSelection);
+    })
+  );
+
+  menu.appendChild(
+    mkMenuItem("Block shading", () => {
+      window._activeContextMenuClearSelection = null; // keep the selection visible while the modal is open
+      closeContextMenu();
+      onBlockShade(lo, hi, onClearSelection);
     })
   );
 
@@ -1851,7 +1886,7 @@ function renderAlignmentPng(tabState, colCount, resolveSeqColor, resolveAnnoColo
     showConsensus = true
   } = opts;
 
-  const scale = 2; // 2x bitmap for crisp publication output
+  const scale = 2;
   const cellW = Math.max(4, Math.round(fontSize * 0.62));
   const cellH = Math.max(6, Math.round(fontSize * 1.3));
   const margin = 10;
@@ -1865,127 +1900,156 @@ function renderAlignmentPng(tabState, colCount, resolveSeqColor, resolveAnnoColo
   const seqNum = tabState.records.length;
   const setsOfRows = Math.max(1, Math.ceil(colCount / columnsPerRow));
 
-  let totalRows = 0;
-  for (let k = 0; k < setsOfRows; k++) {
-    const lo = k * columnsPerRow;
-    const hi = Math.min(colCount, lo + columnsPerRow) - 1;
-    if (showNumbering) totalRows++;
+  // Browsers cap canvas bitmap dimensions; stay well under them.
+  const MAX_DIM = 8000;
+  const logicalW = rowChars * cellW + margin * 2;
+  if (logicalW * scale > MAX_DIM) return null; // too wide; caller alerts
+  const maxRowsPerCanvas = Math.max(1, Math.floor((MAX_DIM / scale - margin * 2) / cellH));
+
+  function blockRowCount(lo, hi) {
+    let n = (showNumbering ? 1 : 0) + seqNum + (showConsensus ? 1 : 0) + 1;
     if (showAnnotations) {
       annotations.forEach((ann) => {
         for (let c = lo; c <= hi; c++) {
           if ((ann.data[c] || " ") !== " ") {
-            totalRows++;
+            n++;
             break;
           }
         }
       });
     }
-    totalRows += seqNum + (showConsensus ? 1 : 0) + 1; // +1 spacer row
+    return n;
   }
 
-  const logicalW = rowChars * cellW + margin * 2;
-  const logicalH = totalRows * cellH + margin * 2;
-  const canvas = document.createElement("canvas");
-  canvas.width = logicalW * scale;
-  canvas.height = logicalH * scale;
-  canvas.style.width = logicalW + "px";
-  canvas.style.height = logicalH + "px";
-  const ctx = canvas.getContext("2d");
-  ctx.setTransform(scale, 0, 0, scale, 0, 0);
-  ctx.fillStyle = "#ffffff";
-  ctx.fillRect(0, 0, logicalW, logicalH);
-  ctx.font = `${fontSize}px Consolas, monospace`;
-  ctx.textBaseline = "middle";
-
-  const nameX = margin;
-  const indexX = margin + (nameChars + 2) * cellW;
-  const gridX = margin + leftChars * cellW;
-  const rightIndexX = gridX + columnsPerRow * cellW + 2 * cellW;
-
-  function drawRow(name, indexNum, cells, y) {
-    ctx.fillStyle = "#000000";
-    ctx.textAlign = "left";
-    ctx.fillText(name.slice(0, nameChars), nameX, y + cellH / 2);
-    if (indexNum !== null) {
-      ctx.textAlign = "right";
-      ctx.fillText(String(indexNum), indexX + INDEX_CHARS * cellW, y + cellH / 2);
-    }
-    cells.forEach((cell, i) => {
-      const x = gridX + i * cellW;
-      const bg = cell.bgHex.replace("#", "");
-      ctx.fillStyle = "#" + bg;
-      ctx.fillRect(x, y, cellW, cellH);
-      const fg = decideForegroundHex(bg, tabState.luminance).replace("#", "");
-      ctx.fillStyle = "#" + fg;
-      ctx.textAlign = "center";
-      ctx.fillText(cell.ch, x + cellW / 2, y + cellH / 2);
-    });
-    if (indexNum !== null) {
-      ctx.fillStyle = "#000000";
-      ctx.textAlign = "right";
-      ctx.fillText(String(indexNum + cells.length - 1), rightIndexX + INDEX_CHARS * cellW, y + cellH / 2);
-    }
-  }
-
-  let y = margin;
-  let trueIndex = tabState.firstIndex || 1;
+  // Group blocks into chunks that each fit one canvas
+  const chunks = [];
+  let chunk = [];
+  let chunkRows = 0;
   for (let k = 0; k < setsOfRows; k++) {
     const lo = k * columnsPerRow;
     const hi = Math.min(colCount, lo + columnsPerRow) - 1;
-    const nCols = hi - lo + 1;
+    const n = blockRowCount(lo, hi);
+    if (n > maxRowsPerCanvas) return null; // a single block won't fit; caller alerts
+    if (chunkRows + n > maxRowsPerCanvas && chunk.length > 0) {
+      chunks.push({ blocks: chunk, rows: chunkRows });
+      chunk = [];
+      chunkRows = 0;
+    }
+    chunk.push(k);
+    chunkRows += n;
+  }
+  if (chunk.length) chunks.push({ blocks: chunk, rows: chunkRows });
 
-    if (showNumbering) {
+  const canvases = [];
+  let trueIndex = tabState.firstIndex || 1;
+
+  chunks.forEach(({ blocks, rows }) => {
+    const logicalH = rows * cellH + margin * 2;
+    const canvas = document.createElement("canvas");
+    canvas.width = logicalW * scale;
+    canvas.height = logicalH * scale;
+    canvas.style.width = logicalW + "px";
+    canvas.style.height = logicalH + "px";
+    canvas.style.display = "block";
+    canvas.style.marginBottom = "8px";
+    const ctx = canvas.getContext("2d");
+    ctx.setTransform(scale, 0, 0, scale, 0, 0);
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(0, 0, logicalW, logicalH);
+    ctx.font = `${fontSize}px Consolas, monospace`;
+    ctx.textBaseline = "middle";
+
+    const nameX = margin;
+    const indexX = margin + (nameChars + 2) * cellW;
+    const gridX = margin + leftChars * cellW;
+    const rightIndexX = gridX + columnsPerRow * cellW + 2 * cellW;
+
+    function drawRow(name, indexNum, cells, y) {
       ctx.fillStyle = "#000000";
       ctx.textAlign = "left";
-      for (let c = 0; c < nCols; c++) {
-        if ((c + 1) % numberingSpacing === 0) {
-          ctx.fillText(String(trueIndex + c), gridX + c * cellW, y + cellH / 2);
-        }
+      ctx.fillText(name.slice(0, nameChars), nameX, y + cellH / 2);
+      if (indexNum !== null) {
+        ctx.textAlign = "right";
+        ctx.fillText(String(indexNum), indexX + INDEX_CHARS * cellW, y + cellH / 2);
       }
-      y += cellH;
-    }
-
-    if (showAnnotations) {
-      annotations.forEach((ann, r) => {
-        const cells = [];
-        let empty = true;
-        for (let c = lo; c <= hi; c++) {
-          const ch = ann.data[c] || " ";
-          if (ch !== " ") empty = false;
-          cells.push({ ch, bgHex: resolveAnnoColor(r, c) });
-        }
-        if (!empty) {
-          drawRow(ann.name, null, cells, y);
-          y += cellH;
-        }
+      cells.forEach((cell, i) => {
+        const x = gridX + i * cellW;
+        const bg = cell.bgHex.replace("#", "");
+        ctx.fillStyle = "#" + bg;
+        ctx.fillRect(x, y, cellW, cellH);
+        const fg = decideForegroundHex(bg, tabState.luminance).replace("#", "");
+        ctx.fillStyle = "#" + fg;
+        ctx.textAlign = "center";
+        ctx.fillText(cell.ch, x + cellW / 2, y + cellH / 2);
       });
+      if (indexNum !== null) {
+        ctx.fillStyle = "#000000";
+        ctx.textAlign = "right";
+        ctx.fillText(String(indexNum + cells.length - 1), rightIndexX + INDEX_CHARS * cellW, y + cellH / 2);
+      }
     }
 
-    tabState.records.forEach((rec, r) => {
-      const cells = [];
-      for (let c = lo; c <= hi; c++) {
-        const ch = rec.seq[c] || "-";
-        cells.push({ ch, bgHex: resolveSeqColor(r, c, ch) });
+    let y = margin;
+    blocks.forEach((k) => {
+      const lo = k * columnsPerRow;
+      const hi = Math.min(colCount, lo + columnsPerRow) - 1;
+      const nCols = hi - lo + 1;
+
+      if (showNumbering) {
+        ctx.fillStyle = "#000000";
+        ctx.textAlign = "left";
+        for (let c = 0; c < nCols; c++) {
+          if ((c + 1) % numberingSpacing === 0) {
+            ctx.fillText(String(trueIndex + c), gridX + c * cellW, y + cellH / 2);
+          }
+        }
+        y += cellH;
       }
-      drawRow(rec.header, trueIndex, cells, y);
-      y += cellH;
+
+      if (showAnnotations) {
+        annotations.forEach((ann, r) => {
+          const cells = [];
+          let empty = true;
+          for (let c = lo; c <= hi; c++) {
+            const ch = ann.data[c] || " ";
+            if (ch !== " ") empty = false;
+            cells.push({ ch, bgHex: resolveAnnoColor(r, c) });
+          }
+          if (!empty) {
+            drawRow(ann.name, null, cells, y);
+            y += cellH;
+          }
+        });
+      }
+
+      tabState.records.forEach((rec, r) => {
+        const cells = [];
+        for (let c = lo; c <= hi; c++) {
+          const ch = rec.seq[c] || "-";
+          cells.push({ ch, bgHex: resolveSeqColor(r, c, ch) });
+        }
+        drawRow(rec.header, trueIndex, cells, y);
+        y += cellH;
+      });
+
+      if (showConsensus) {
+        const cells = [];
+        for (let c = lo; c <= hi; c++) {
+          const { ch, bgHex } = resolveConsensus(c);
+          cells.push({ ch, bgHex });
+        }
+        drawRow("Consensus", trueIndex, cells, y);
+        y += cellH;
+      }
+
+      y += cellH; // spacer row
+      trueIndex += nCols;
     });
 
-    if (showConsensus) {
-      const cells = [];
-      for (let c = lo; c <= hi; c++) {
-        const { ch, bgHex } = resolveConsensus(c);
-        cells.push({ ch, bgHex });
-      }
-      drawRow("Consensus", trueIndex, cells, y);
-      y += cellH;
-    }
+    canvases.push(canvas);
+  });
 
-    y += cellH;
-    trueIndex += nCols;
-  }
-
-  return canvas;
+  return canvases;
 }
 
 function decideForegroundHex(bgHex, luminanceThreshold) {
@@ -2649,9 +2713,15 @@ function showPrintPreviewModal(tabState, colCount, resolveSeqColor, resolveAnnoC
       showNumbering: numCheck.checked,
       showConsensus: consCheck.checked
     };
-    const canvas = renderAlignmentPng(tabState, colCount, resolveSeqColor, resolveAnnoColor, resolveConsensus, opts);
+    const canvases = renderAlignmentPng(tabState, colCount, resolveSeqColor, resolveAnnoColor, resolveConsensus, opts);
+    if (!canvases) {
+      alert(
+        "This alignment is too large to render as a PNG at these settings. Try fewer columns per row or a smaller font size."
+      );
+      return;
+    }
     overlay.remove();
-    showPngPreviewWindow(canvas, baseName);
+    showPngPreviewWindow(canvases, baseName);
   });
   box.appendChild(execBtn);
   overlay.appendChild(box);
@@ -2661,7 +2731,7 @@ function showPrintPreviewModal(tabState, colCount, resolveSeqColor, resolveAnnoC
   document.body.appendChild(overlay);
 }
 
-function showPngPreviewWindow(canvas, baseName) {
+function showPngPreviewWindow(canvases, baseName) {
   const overlay = document.createElement("div");
   overlay.className = "modal-overlay";
   const box = document.createElement("div");
@@ -2675,7 +2745,7 @@ function showPngPreviewWindow(canvas, baseName) {
   scrollWrap.style.maxHeight = "70vh";
   scrollWrap.style.background = "#ffffff";
   scrollWrap.style.border = "1px solid #444";
-  scrollWrap.appendChild(canvas);
+  canvases.forEach((c) => scrollWrap.appendChild(c));
   box.appendChild(scrollWrap);
 
   const btnRow = document.createElement("div");
@@ -2684,14 +2754,16 @@ function showPngPreviewWindow(canvas, baseName) {
   saveBtn.textContent = "Save as PNG";
   saveBtn.className = "modal-close-btn";
   saveBtn.addEventListener("click", () => {
-    canvas.toBlob((blob) => {
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = baseName + ".png";
-      a.click();
-      URL.revokeObjectURL(url);
-    }, "image/png");
+    canvases.forEach((c, i) => {
+      c.toBlob((blob) => {
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = canvases.length === 1 ? `${baseName}.png` : `${baseName}-${i + 1}.png`;
+        a.click();
+        URL.revokeObjectURL(url);
+      }, "image/png");
+    });
   });
   const closeBtn = document.createElement("button");
   closeBtn.textContent = "Close";
@@ -2706,7 +2778,6 @@ function showPngPreviewWindow(canvas, baseName) {
   });
   document.body.appendChild(overlay);
 }
-
 function showSeqLogoOptionsModal(tabState, onGenerate) {
   const overlay = document.createElement("div");
   overlay.className = "modal-overlay";
@@ -2985,6 +3056,82 @@ function showRegexShadeModal(tabState, ctx) {
   document.body.appendChild(overlay);
 }
 
+// ---------- Block shading modal ----------
+function showBlockShadingModal(lo, hi, sections, onClose) {
+  const overlay = document.createElement("div");
+  overlay.className = "modal-overlay";
+  const box = document.createElement("div");
+  box.className = "modal-box shade-modal";
+  box.innerHTML = `<h3>Shade manually</h3>`;
+
+  sections.forEach((section) => {
+    // snapshot original colors for Reset
+    const orig = [];
+    for (let r = 0; r < section.rowCount; r++) {
+      const rowColors = [];
+      for (let c = lo; c <= hi; c++) rowColors.push(section.getColor(r, c));
+      orig.push(rowColors);
+    }
+
+    const headerRow = document.createElement("div");
+    headerRow.className = "shade-row";
+    const nameLabel = document.createElement("label");
+    nameLabel.textContent = section.name;
+    nameLabel.style.fontWeight = "bold";
+    const shadingLabel = document.createElement("label");
+    shadingLabel.textContent = " Shading";
+    headerRow.append(nameLabel, shadingLabel);
+    box.appendChild(headerRow);
+
+    const row = document.createElement("div");
+    row.className = "shade-row";
+    const resetBtn = document.createElement("button");
+    resetBtn.textContent = "Reset";
+    resetBtn.className = "modal-close-btn";
+    const colorInput = document.createElement("input");
+    colorInput.type = "color";
+    colorInput.value = orig.length ? orig[0][0] : "#FFFFFF";
+    row.append(resetBtn, colorInput);
+    box.appendChild(row);
+
+    function paintAll(getHex) {
+      const hits = [];
+      for (let r = 0; r < section.rowCount; r++) {
+        for (let c = lo; c <= hi; c++) {
+          const hex = getHex(r, c - lo);
+          section.setColor(r, c, hex);
+          hits.push({ row: r, col: c, color: hexToRgbFloat(hex) });
+        }
+      }
+      section.apply(hits);
+    }
+
+    colorInput.addEventListener("input", () => paintAll(() => colorInput.value));
+    resetBtn.addEventListener("click", () => {
+      paintAll((r, i) => orig[r][i]);
+      colorInput.value = orig.length ? orig[0][0] : "#FFFFFF";
+    });
+  });
+
+  const doneBtn = document.createElement("button");
+  doneBtn.textContent = "Done";
+  doneBtn.className = "modal-close-btn";
+  doneBtn.addEventListener("click", () => {
+    overlay.remove();
+    if (onClose) onClose();
+  });
+  box.appendChild(doneBtn);
+
+  overlay.appendChild(box);
+  overlay.addEventListener("click", (e) => {
+    if (e.target === overlay) {
+      overlay.remove();
+      if (onClose) onClose();
+    }
+  });
+  document.body.appendChild(overlay);
+}
+
 // ---------- ScanProsite confirmation modal ----------
 function showScanPrositeConfirmModal(onContinue) {
   const overlay = document.createElement("div");
@@ -3011,6 +3158,115 @@ function showScanPrositeConfirmModal(onContinue) {
   overlay.appendChild(box);
   overlay.addEventListener("click", (e) => {
     if (e.target === overlay) overlay.remove(); // clicking outside = cancel, no callback fired
+  });
+  document.body.appendChild(overlay);
+}
+
+// ---------- Annotate selection modal ----------
+function showAnnotateSelectionModal(tabState, lo, hi, onApply, onClose) {
+  const allowableLength = hi - lo + 1;
+  const overlay = document.createElement("div");
+  overlay.className = "modal-overlay";
+  const box = document.createElement("div");
+  box.className = "modal-box shade-modal";
+  box.innerHTML = `<h3>Add annotations</h3>`;
+
+  const rowEntries = [];
+  tabState.annotations.forEach((ann) => {
+    const row = document.createElement("div");
+    row.className = "shade-row";
+
+    const input = document.createElement("input");
+    input.type = "text";
+    input.style.flex = "1";
+    input.maxLength = allowableLength;
+    let existing = "";
+    for (let c = lo; c <= hi; c++) existing += ann.data[c] || " ";
+    input.value = existing.trim() ? existing : "";
+
+    const label = document.createElement("label");
+    label.textContent = ann.name;
+    label.style.color = input.value.trim() ? "#000" : "#999";
+
+    input.addEventListener("input", () => {
+      label.style.color = input.value.trim() ? "#000" : "#999";
+    });
+
+    row.append(input, label);
+    box.appendChild(row);
+    rowEntries.push({ ann, input });
+  });
+
+  const commonRow = document.createElement("div");
+  commonRow.className = "shade-row";
+  const commonInput = document.createElement("input");
+  commonInput.type = "text";
+  commonInput.readOnly = true;
+  commonInput.style.flex = "1";
+  commonInput.value = "Common characters: " + ["➰", "⇐", "⇒", "α", "β", "γ", "δ", "ε", "π"].join(", ");
+  //commonRow.appendChild(commonInput);
+  //box.appendChild(commonRow);
+
+  const radioName = `annotateproc_${Math.random().toString(36).slice(2)}`;
+  const procRow = document.createElement("div");
+  procRow.className = "shade-row";
+  [
+    ["Add spaces to beginning", "left"],
+    ["Add spaces to end", "right"],
+    ["Repeat pattern", "repeat"]
+  ].forEach(([text, value]) => {
+    const wrap = document.createElement("span");
+    const radio = document.createElement("input");
+    radio.type = "radio";
+    radio.name = radioName;
+    radio.value = value;
+    if (value === "right") radio.checked = true;
+    const label = document.createElement("label");
+    label.textContent = " " + text;
+    wrap.append(radio, label);
+    procRow.appendChild(wrap);
+  });
+  box.appendChild(procRow);
+
+  function annotate(ann, text, procedure) {
+    let result;
+    if (procedure === "repeat") {
+      result = "";
+      if (text.length > 0) {
+        while (result.length < allowableLength) result += text;
+        result = result.substring(0, allowableLength);
+      } else {
+        result = " ".repeat(allowableLength);
+      }
+    } else if (procedure === "left") {
+      result = text.padStart(allowableLength, " ");
+    } else {
+      result = text.padEnd(allowableLength, " ");
+    }
+    let data = ann.data;
+    if (data.length <= hi) data = data.padEnd(hi + 1, " ");
+    ann.data = data.substring(0, lo) + result + data.substring(hi + 1);
+  }
+
+  const execBtn = document.createElement("button");
+  execBtn.textContent = "Annotate";
+  execBtn.className = "modal-close-btn";
+  execBtn.addEventListener("click", () => {
+    const checked = procRow.querySelector(`input[name="${radioName}"]:checked`);
+    const procedure = checked ? checked.value : "right";
+    rowEntries.forEach(({ ann, input }) => annotate(ann, input.value, procedure));
+    onApply();
+    overlay.remove();
+    if (onClose) onClose();
+  });
+  box.appendChild(execBtn);
+
+  overlay.appendChild(box);
+  overlay.addEventListener("click", (e) => {
+    if (e.target === overlay) {
+      overlay.remove();
+      if (onClose) onClose();
+    }
   });
   document.body.appendChild(overlay);
 }
@@ -3485,7 +3741,8 @@ function initAlignmentRenderer(canvas, alignPanel, spacer, config) {
       rebuildBuffer() {},
       setCellSize() {},
       setLuminance() {},
-      setHoverCol() {}
+      setHoverCol() {},
+      setHoverRow() {}
     };
   }
 
@@ -3691,8 +3948,10 @@ function initAlignmentRenderer(canvas, alignPanel, spacer, config) {
         buildInstanceData();
         sizeCanvasAndSpacer();
       },
+      (lo2, hi2, onModalClose) => config.onAnnotateColumns(lo2, hi2, onModalClose),
+      (lo2, hi2, onModalClose) => config.onBlockShadeColumns(lo2, hi2, onModalClose),
       (lo2, hi2) => config.onGenerateLogo(lo2, hi2),
-      (lo2, hi2) => config.onExportColumns(lo2, hi2), // ← add this
+      (lo2, hi2) => config.onExportColumns(lo2, hi2),
       clearSelection
     );
   });
@@ -3792,6 +4051,8 @@ function initAlignmentRenderer(canvas, alignPanel, spacer, config) {
         buildInstanceData();
         sizeCanvasAndSpacer();
       },
+      (lo2, hi2, onModalClose) => config.onAnnotateColumns(lo2, hi2, onModalClose),
+      (lo2, hi2, onModalClose) => config.onBlockShadeColumns(lo2, hi2, onModalClose),
       (lo2, hi2) => config.onGenerateLogo(lo2, hi2),
       (lo2, hi2) => config.onExportColumns(lo2, hi2),
       clearSelection
@@ -3861,6 +4122,10 @@ function initAlignmentRenderer(canvas, alignPanel, spacer, config) {
     setHoverCol(col) {
       gl.useProgram(prog);
       gl.uniform1f(uni.hoverCol, col);
+    },
+    setHoverRow(row) {
+      gl.useProgram(prog);
+      gl.uniform1f(uni.hoverRow, row);
     }
   };
 }
@@ -4304,6 +4569,63 @@ function createTab(name, records, presetState = null) {
       consensusCtl.rebuildBuffer();
       updateHScrollSpacer();
     },
+    onAnnotateColumns: (lo, hi, onModalClose) => {
+      showAnnotateSelectionModal(tabState, lo, hi, () => annotationCtl.rebuildBuffer(), onModalClose);
+    },
+    onAnnotateColumns: (lo, hi, onModalClose) => {
+      showAnnotateSelectionModal(tabState, lo, hi, () => annotationCtl.rebuildBuffer(), onModalClose);
+    },
+    onBlockShadeColumns: (lo, hi, onModalClose) => {
+      showBlockShadingModal(
+        lo,
+        hi,
+        [
+          {
+            name: "(Annotations)",
+            rowCount: tabState.annotations.length,
+            getColor: (r, c) => {
+              const ann = tabState.annotations[r];
+              return (ann.colors && ann.colors[c]) || rgbFloatToHex(ANNOTATION_BG);
+            },
+            setColor: (r, c, hex) => {
+              const ann = tabState.annotations[r];
+              if (!ann.colors) ann.colors = {};
+              ann.colors[c] = hex;
+            },
+            apply: (hits) => annotationCtl.applyColorOverrides(hits)
+          },
+          {
+            name: "(Sequences)",
+            rowCount: tabState.records.length,
+            getColor: (r, c) => {
+              const rec = tabState.records[r];
+              const ch = rec.seq[c] || "-";
+              return (rec.charColors && rec.charColors[c]) || rgbFloatToHex(getShadeColor(tabState, r, c, ch));
+            },
+            setColor: (r, c, hex) => {
+              const rec = tabState.records[r];
+              if (!rec.charColors) rec.charColors = {};
+              rec.charColors[c] = hex;
+            },
+            apply: (hits) => alignmentCtl.applyColorOverrides(hits)
+          },
+          {
+            name: "(Consensus)",
+            rowCount: 1,
+            getColor: (r, c) => {
+              const overrideChar = tabState.consensusOverrides[c];
+              const ch = overrideChar !== undefined ? overrideChar : consensusStr[c] || "-";
+              return tabState.consensusColors[c] || rgbFloatToHex(getColorForChar(tabState, ch));
+            },
+            setColor: (r, c, hex) => {
+              tabState.consensusColors[c] = hex;
+            },
+            apply: (hits) => consensusCtl.applyColorOverrides(hits)
+          }
+        ],
+        onModalClose
+      );
+    },
     onGenerateLogo: (lo, hi) => {
       showSeqLogoOptionsModal(tabState, (opts) => {
         showSequenceLogoWindow(tabState, hi - lo + 1, { ...opts, colOffset: lo });
@@ -4346,10 +4668,12 @@ function createTab(name, records, presetState = null) {
     else if (trackType === "consensus") rowName = "Consensus";
     hoverInfoEl.textContent = `Col ${colNum} \u2014 ${rowName}`;
     allTrackCtls.forEach((ctl) => ctl.setHoverCol(col));
+    alignmentCtl.setHoverRow(trackType === "alignment" ? row : -1);
   }
   function handleHoverEnd() {
     hoverInfoEl.textContent = "";
     allTrackCtls.forEach((ctl) => ctl.setHoverCol(-1));
+    alignmentCtl.setHoverRow(-1);
   }
 
   // ---- Annotation names (editable, with 5 actions) ----
@@ -4476,7 +4800,6 @@ function createTab(name, records, presetState = null) {
     numberingCtl.onScroll(left);
     consensusCtl.onScroll(left);
   });
-
 
   alignPanel.addEventListener(
     "wheel",
@@ -5015,7 +5338,7 @@ function showExamplesModal() {
   const table = document.createElement("table");
   table.className = "color-table examples-table";
   const thead = document.createElement("tr");
-  ["Example", "FASTA", "SLIM"].forEach((h) => {
+  ["Example", /*"FASTA",*/ "SLIM"].forEach((h) => {
     const th = document.createElement("th");
     th.textContent = h;
     thead.appendChild(th);
@@ -5030,6 +5353,7 @@ function showExamplesModal() {
 
     function makeLoadBtn(filename) {
       const td = document.createElement("td");
+      if (filename.endsWith(".fasta")) td.style.display = "none";
       const btn = document.createElement("button");
       btn.textContent = "Open";
       btn.className = "examples-open-btn";
