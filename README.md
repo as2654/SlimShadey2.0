@@ -40,7 +40,9 @@ Works on all operating systems, including mobile. Touch gestures provide panning
 
 ## Getting started
 
-No build step is required — clone the repository and open `index.html` in a browser, or serve the directory with any static file server.
+You can use SlimShadey 2.0 by visiting [SlimShadey](SlimShadey.adsbio.net).
+
+No build step is required. Clone the repository and open `index.html` in a browser, or serve the directory with any static file server.
 
 Alignments load from FASTA files or from the bundled example datasets.
 
