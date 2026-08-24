@@ -4,7 +4,7 @@
 
 SlimShadey 2.0 is a complete reimplementation of the original [SlimShadey](https://github.com/shaha65/slim-shadey) desktop application as a zero-installation web app. Alignments are rendered on the GPU via WebGL2, keeping panning, recoloring, and selection responsive regardless of alignment size. The program runs entirely client-side — no account, no server, no data ever leaves your machine.
 
-**[Try it here](https://shaha65.github.io/slim-shadey/)**
+**[Try it here](https://slimshadey.adsbio.net)**
 
 ## Features
 
@@ -46,7 +46,7 @@ Alignments load from FASTA files or from the bundled example datasets.
 
 ## License
 
-[License to be added.]
+GNU GPL v3.
 
 ## Citation
 
