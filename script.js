@@ -1584,7 +1584,7 @@ function showColumnContextMenu(
 
   const label = document.createElement("div");
   label.className = "context-menu-label";
-  label.textContent = lo === hi ? `Column ${lo}` : `Columns ${lo}\u2013${hi}`;
+  label.textContent = lo === hi ? `Column ${lo + 1}` : `Columns ${lo + 1}\u2013${hi + 1}`;
   menu.appendChild(label);
 
   menu.appendChild(
