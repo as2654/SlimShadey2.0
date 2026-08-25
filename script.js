@@ -920,26 +920,52 @@ function computeMatrixShadeColor(tabState, row, col, ch) {
   return matrixColorFor(toUse, ch.toUpperCase(), matchRgb, mismatchRgb, matrixName);
 }
 
-function computeUniqueColumnCounts(records, colCount) {
+function computeUniqueColumnColors(tabState, colCount) {
+  const cfg = tabState.shadeConfig.unique;
+  const records = tabState.records;
+  const white = [1, 1, 1];
+  const shadeRgb = hexToRgbFloat(cfg.colorHex); // parsed once per rebuild, not per cell
+
+  // Phase 1: count chars per column. Row-major for sequential string access;
+  // one toUpperCase() per row instead of one per cell.
   const counts = new Array(colCount);
-  for (let c = 0; c < colCount; c++) {
-    const m = {};
-    for (let r = 0; r < records.length; r++) {
-      const ch = (records[r].seq[c] || "-").toUpperCase();
-      m[ch] = (m[ch] || 0) + 1;
+  for (let c = 0; c < colCount; c++) counts[c] = new Map();
+  for (let r = 0; r < records.length; r++) {
+    const seq = records[r].seq.toUpperCase();
+    let c = 0;
+    for (; c < seq.length && c < colCount; c++) {
+      const m = counts[c];
+      const ch = seq[c];
+      m.set(ch, (m.get(ch) || 0) + 1);
     }
-    counts[c] = m;
+    for (; c < colCount; c++) {
+      // short rows contribute gap counts, matching the old (seq[c] || "-") behavior
+      const m = counts[c];
+      m.set("-", (m.get("-") || 0) + 1);
+    }
   }
-  return counts;
+
+  // Phase 2: per column, precompute char -> color for distinct chars only
+  // (<= alphabet size per column instead of rows per column).
+  // Both cases are stored so the cell loop never calls toUpperCase().
+  const result = new Array(colCount);
+  for (let c = 0; c < colCount; c++) {
+    const colColors = {};
+    counts[c].forEach((count, ch) => {
+      const color = ch === "-" && !cfg.shadeGaps ? white : count <= cfg.maxCount ? shadeRgb : white;
+      colColors[ch] = color;
+      const lower = ch.toLowerCase();
+      if (lower !== ch) colColors[lower] = color;
+    });
+    result[c] = colColors;
+  }
+  return result;
 }
 
 function computeUniqueShadeColor(tabState, col, ch) {
-  const cfg = tabState.shadeConfig.unique;
-  const upper = ch.toUpperCase();
-  if (upper === "-" && !cfg.shadeGaps) return [1, 1, 1];
-  const count = tabState.uniqueColCounts[col][upper] || 0;
-  if (count <= cfg.maxCount) return hexToRgbFloat(cfg.colorHex);
-  return [1, 1, 1];
+  const colMap = tabState.uniqueColCounts[col];
+  if (!colMap) return [1, 1, 1];
+  return colMap[ch] || [1, 1, 1];
 }
 
 function computeSequenceShadeColor(tabState, row, col, ch) {
@@ -1191,7 +1217,7 @@ function showHmmerLoadingOverlay() {
 
   const statusText = document.createElement("div");
   statusText.className = "shade-row";
-  statusText.textContent = "Submitting searches...";
+  statusText.textContent = "Preparing database...";
   box.appendChild(statusText);
 
   overlay.appendChild(box);
@@ -1380,26 +1406,25 @@ const VS_SOURCE = `#version 300 es
   in vec2 a_quadPos;
   in vec2 a_cellPos;
   in vec3 a_color;
-  in float a_hover;
   in float a_glyphIndex;
   uniform vec2 u_resolution;
   uniform vec2 u_cellSize;
   uniform vec2 u_scroll;
+  uniform vec2 u_windowOrigin;
   uniform vec2 u_atlasGrid;
   out vec3 v_color;
-  out float v_hover;
   out float v_col;
   out float v_row;
   out vec2 v_texCoord;
   void main() {
-    vec2 cellPixel = a_cellPos * u_cellSize - u_scroll;
+    vec2 absCell = a_cellPos + u_windowOrigin;
+    vec2 cellPixel = absCell * u_cellSize - u_scroll;
     vec2 pixelPos = cellPixel + a_quadPos * u_cellSize;
     vec2 clip = (pixelPos / u_resolution) * 2.0 - 1.0;
     gl_Position = vec4(clip.x, -clip.y, 0, 1);
     v_color = a_color;
-    v_hover = a_hover;
-    v_col = a_cellPos.x;
-    v_row = a_cellPos.y;
+    v_col = absCell.x;
+    v_row = absCell.y;
     float col = mod(a_glyphIndex, u_atlasGrid.x);
     float rowg = floor(a_glyphIndex / u_atlasGrid.x);
     vec2 glyphOrigin = vec2(col, rowg) / u_atlasGrid;
@@ -1410,13 +1435,14 @@ const VS_SOURCE = `#version 300 es
 const FS_SOURCE = `#version 300 es
   precision mediump float;
   in vec3 v_color;
-  in float v_hover;
   in float v_col;
   in float v_row;
   in vec2 v_texCoord;
   uniform sampler2D u_atlas;
   uniform float u_hoverCol;
   uniform float u_hoverRow;
+  uniform float u_hoverCellCol;
+  uniform float u_hoverCellRow;
   uniform float u_luminance;
   uniform float u_selStart;
   uniform float u_selEnd;
@@ -1435,9 +1461,10 @@ const FS_SOURCE = `#version 300 es
   void main() {
     float colHighlight = (u_hoverCol >= 0.0 && abs(v_col - u_hoverCol) < 0.5) ? 1.0 : 0.0;
     float rowHighlight = (u_hoverRow >= 0.0 && abs(v_row - u_hoverRow) < 0.5) ? 1.0 : 0.0;
+    float cellHover = (u_hoverCellCol >= 0.0 && abs(v_col - u_hoverCellCol) < 0.5 && abs(v_row - u_hoverCellRow) < 0.5) ? 1.0 : 0.0;
     float selActive = (u_selStart >= 0.0 && v_col >= u_selStart - 0.5 && v_col <= u_selEnd + 0.5) ? 1.0 : 0.0;
     vec3 hoverColor = vec3(0.55, 0.72, 1.0);
-    vec3 bg = mix(v_color, hoverColor, 0.45 * v_hover);
+    vec3 bg = mix(v_color, hoverColor, 0.45 * cellHover);
     bg = mix(bg, hoverColor, 0.25 * colHighlight);
     bg = mix(bg, hoverColor, 0.25 * rowHighlight);
     vec3 selectColor = vec3(0.01, 0.99, 0.01);
@@ -1486,9 +1513,8 @@ function compileMsaProgram(gl) {
   const instBuf = gl.createBuffer();
   const cellLoc = gl.getAttribLocation(prog, "a_cellPos");
   const colorLoc = gl.getAttribLocation(prog, "a_color");
-  const hoverLoc = gl.getAttribLocation(prog, "a_hover");
   const glyphLoc = gl.getAttribLocation(prog, "a_glyphIndex");
-  const stride = 7 * 4;
+  const stride = 6 * 4;
   gl.bindBuffer(gl.ARRAY_BUFFER, instBuf);
   gl.enableVertexAttribArray(cellLoc);
   gl.vertexAttribPointer(cellLoc, 2, gl.FLOAT, false, stride, 0);
@@ -1496,11 +1522,8 @@ function compileMsaProgram(gl) {
   gl.enableVertexAttribArray(colorLoc);
   gl.vertexAttribPointer(colorLoc, 3, gl.FLOAT, false, stride, 8);
   gl.vertexAttribDivisor(colorLoc, 1);
-  gl.enableVertexAttribArray(hoverLoc);
-  gl.vertexAttribPointer(hoverLoc, 1, gl.FLOAT, false, stride, 20);
-  gl.vertexAttribDivisor(hoverLoc, 1);
   gl.enableVertexAttribArray(glyphLoc);
-  gl.vertexAttribPointer(glyphLoc, 1, gl.FLOAT, false, stride, 24);
+  gl.vertexAttribPointer(glyphLoc, 1, gl.FLOAT, false, stride, 20);
   gl.vertexAttribDivisor(glyphLoc, 1);
   gl.bindVertexArray(null);
 
@@ -1512,6 +1535,9 @@ function compileMsaProgram(gl) {
     atlasSampler: gl.getUniformLocation(prog, "u_atlas"),
     hoverCol: gl.getUniformLocation(prog, "u_hoverCol"),
     hoverRow: gl.getUniformLocation(prog, "u_hoverRow"),
+    hoverCellCol: gl.getUniformLocation(prog, "u_hoverCellCol"),
+    hoverCellRow: gl.getUniformLocation(prog, "u_hoverCellRow"),
+    windowOrigin: gl.getUniformLocation(prog, "u_windowOrigin"),
     luminance: gl.getUniformLocation(prog, "u_luminance"),
     selStart: gl.getUniformLocation(prog, "u_selStart"),
     selEnd: gl.getUniformLocation(prog, "u_selEnd")
@@ -1520,6 +1546,9 @@ function compileMsaProgram(gl) {
   gl.uniform1i(uni.atlasSampler, 0);
   gl.uniform1f(uni.hoverCol, -1);
   gl.uniform1f(uni.hoverRow, -1);
+  gl.uniform1f(uni.hoverCellCol, -1);
+  gl.uniform1f(uni.hoverCellRow, -1);
+  gl.uniform2f(uni.windowOrigin, 0, 0);
   gl.uniform1f(uni.selStart, -1);
   gl.uniform1f(uni.selEnd, -1);
 
@@ -1528,13 +1557,13 @@ function compileMsaProgram(gl) {
 
 function buildInstanceArray(rowCount, colCount, cellForFn) {
   const instanceCount = rowCount * colCount;
-  const data = new Float32Array(instanceCount * 7);
+  const data = new Float32Array(instanceCount * 6);
   let idx = 0;
   for (let r = 0; r < rowCount; r++) {
     for (let c = 0; c < colCount; c++) {
       const { ch, color } = cellForFn(r, c);
       const gIdx = glyphIndexFor(ch);
-      data.set([c, r, color[0], color[1], color[2], 0, gIdx], idx * 7);
+      data.set([c, r, color[0], color[1], color[2], gIdx], idx * 6);
       idx++;
     }
   }
@@ -3547,6 +3576,23 @@ function drawLogoAxes(ctx, maxBits, len, geom, fontFamily) {
   }
 }
 
+// ---------- On-demand render scheduler ----------
+// Renderers never self-loop. They register a redraw via requestRender();
+// one shared rAF tick drains everything that went dirty this frame.
+const _dirtyRenderers = new Set();
+let _renderTickArmed = false;
+
+function requestRender(renderFn) {
+  _dirtyRenderers.add(renderFn);
+  if (_renderTickArmed) return;
+  _renderTickArmed = true;
+  requestAnimationFrame(() => {
+    _renderTickArmed = false;
+    _dirtyRenderers.forEach((fn) => fn());
+    _dirtyRenderers.clear();
+  });
+}
+
 // ---------- Simple fixed-row track renderer (annotation / numbering / consensus) ----------
 function initTrackRenderer(canvas, wrapperEl, config) {
   const dpr = window.devicePixelRatio || 1;
@@ -3586,7 +3632,7 @@ function initTrackRenderer(canvas, wrapperEl, config) {
   let instData = null;
   let instanceCount = 0;
   let currentScrollX = 0;
-  let hoveredIdx = -1;
+  let hoveredKey = -1;
 
   function rebuild() {
     const rowCount = config.getRowCount();
@@ -3595,6 +3641,7 @@ function initTrackRenderer(canvas, wrapperEl, config) {
     instData = buildInstanceArray(rowCount, colCount, config.cellForFn);
     gl.bindBuffer(gl.ARRAY_BUFFER, instBuf);
     gl.bufferData(gl.ARRAY_BUFFER, instData, gl.DYNAMIC_DRAW);
+    markDirty();
   }
   rebuild();
 
@@ -3623,25 +3670,24 @@ function initTrackRenderer(canvas, wrapperEl, config) {
 
   canvas.addEventListener("mousemove", (e) => {
     const cell = pick(e.clientX, e.clientY);
-    const newIdx = cell ? cell.idx : -1;
-    if (newIdx !== hoveredIdx) {
-      if (hoveredIdx >= 0 && instData) instData[hoveredIdx * 7 + 5] = 0;
-      if (newIdx >= 0 && instData) instData[newIdx * 7 + 5] = 1;
-      hoveredIdx = newIdx;
-      if (instData) {
-        gl.bindBuffer(gl.ARRAY_BUFFER, instBuf);
-        gl.bufferData(gl.ARRAY_BUFFER, instData, gl.DYNAMIC_DRAW);
-      }
+    const newKey = cell ? cell.idx : -1;
+    if (newKey !== hoveredKey) {
+      hoveredKey = newKey;
+      gl.useProgram(prog);
+      gl.uniform1f(uni.hoverCellCol, cell ? cell.col : -1);
+      gl.uniform1f(uni.hoverCellRow, cell ? cell.row : -1);
+      markDirty();
     }
     if (cell && config.onHover) config.onHover(cell.row, cell.col);
     else if (!cell && config.onHoverEnd) config.onHoverEnd();
   });
   canvas.addEventListener("mouseleave", () => {
-    if (hoveredIdx >= 0 && instData) {
-      instData[hoveredIdx * 7 + 5] = 0;
-      hoveredIdx = -1;
-      gl.bindBuffer(gl.ARRAY_BUFFER, instBuf);
-      gl.bufferData(gl.ARRAY_BUFFER, instData, gl.DYNAMIC_DRAW);
+    if (hoveredKey >= 0) {
+      hoveredKey = -1;
+      gl.useProgram(prog);
+      gl.uniform1f(uni.hoverCellCol, -1);
+      gl.uniform1f(uni.hoverCellRow, -1);
+      markDirty();
     }
     if (config.onHoverEnd) config.onHoverEnd();
   });
@@ -3655,41 +3701,48 @@ function initTrackRenderer(canvas, wrapperEl, config) {
     gl.bindTexture(gl.TEXTURE_2D, atlasTex);
     gl.bindVertexArray(vao);
     gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, instanceCount);
-    requestAnimationFrame(render);
   }
-  render();
+  function markDirty() {
+    requestRender(render);
+  }
+  markDirty();
 
   return {
     onScroll(scrollLeft) {
       currentScrollX = scrollLeft * dpr;
       gl.useProgram(prog);
       gl.uniform2f(uni.scroll, currentScrollX, 0);
+      markDirty();
     },
     onResize() {
       sizeCanvas();
       gl.useProgram(prog);
       gl.uniform2f(uni.res, canvas.width, canvas.height);
+      markDirty();
     },
     rebuildBuffer() {
       rebuild();
+      markDirty();
     },
     onRowCountChanged() {
       sizeCanvas();
       rebuild();
       gl.useProgram(prog);
       gl.uniform2f(uni.res, canvas.width, canvas.height);
+      markDirty();
     },
     applyColorOverrides(hitList) {
       const colCount = config.getColCount();
       hitList.forEach(({ row, col, ch, color }) => {
         const idx = row * colCount + col;
-        if (ch !== undefined) instData[idx * 7 + 6] = glyphIndexFor(ch);
-        instData[idx * 7 + 2] = color[0];
-        instData[idx * 7 + 3] = color[1];
-        instData[idx * 7 + 4] = color[2];
+        if (ch !== undefined) instData[idx * 6 + 5] = glyphIndexFor(ch);
+        instData[idx * 6 + 2] = color[0];
+        instData[idx * 6 + 3] = color[1];
+        instData[idx * 6 + 4] = color[2];
       });
       gl.bindBuffer(gl.ARRAY_BUFFER, instBuf);
       gl.bufferData(gl.ARRAY_BUFFER, instData, gl.DYNAMIC_DRAW);
+      markDirty();
     },
     setCellSize(newW, newH) {
       CELL_W = newW;
@@ -3698,19 +3751,23 @@ function initTrackRenderer(canvas, wrapperEl, config) {
       gl.uniform2f(uni.cellSize, CELL_W * dpr, CELL_H * dpr);
       sizeCanvas();
       gl.uniform2f(uni.res, canvas.width, canvas.height);
+      markDirty();
     },
     setLuminance(val) {
       gl.useProgram(prog);
       gl.uniform1f(uni.luminance, val);
+      markDirty();
     },
     setHoverCol(col) {
       gl.useProgram(prog);
       gl.uniform1f(uni.hoverCol, col);
+      markDirty();
     },
     setSelection(startCol, endCol) {
       gl.useProgram(prog);
       gl.uniform1f(uni.selStart, startCol);
       gl.uniform1f(uni.selEnd, endCol);
+      markDirty();
     }
   };
 }
@@ -3753,10 +3810,15 @@ function initAlignmentRenderer(canvas, alignPanel, spacer, config) {
   gl.uniform2f(uni.res, canvas.width, canvas.height);
   gl.uniform1f(uni.luminance, config.getLuminance());
 
-  let instData, instanceCount, cellIndex;
+  let instData, instanceCount;
   let currentScrollX = 0,
     currentScrollY = 0;
-  let hoveredIdx = -1;
+  let hoveredKey = -1; // row * cols + col, change detection only
+  // Instance window: absolute cell range currently in the buffer.
+  let winRowStart = 0,
+    winColStart = 0,
+    winRows = 0,
+    winCols = 0;
 
   function cellForFn(r, c) {
     const rec = config.getRecords()[r];
@@ -3771,23 +3833,68 @@ function initAlignmentRenderer(canvas, alignPanel, spacer, config) {
     rows = records.length;
     cols = config.getColCount();
 
-    if (config.getShadeMode() === "unique") {
-      config.setUniqueColCounts(computeUniqueColumnCounts(records, cols));
+    if (config.getShadeMode() === "unique" && config.recomputeUniqueColors) {
+      config.recomputeUniqueColors(cols);
     }
     if (config.getShadeMode() === "frequency" && config.recomputeFrequencyColumns) {
       config.recomputeFrequencyColumns(cols);
     }
+    rebuildWindow();
+  }
 
-    instanceCount = rows * cols;
-    instData = buildInstanceArray(rows, cols, cellForFn);
-    cellIndex = [];
-    for (let r = 0; r < rows; r++) {
-      for (let c = 0; c < cols; c++) {
-        cellIndex.push({ row: r, col: c, record: records[r] });
+  function viewCells() {
+    return {
+      rows: Math.ceil(canvas.height / (CELL_H * dpr)) + 1,
+      cols: Math.ceil(canvas.width / (CELL_W * dpr)) + 1
+    };
+  }
+
+  function rebuildWindow() {
+    const view = viewCells();
+    // window = viewport + one viewport of margin on each side
+    const firstRow = Math.max(0, Math.floor(currentScrollY / (CELL_H * dpr)));
+    const firstCol = Math.max(0, Math.floor(currentScrollX / (CELL_W * dpr)));
+    const rs = Math.max(0, firstRow - view.rows);
+    const re = Math.min(rows, firstRow + 2 * view.rows);
+    const cs = Math.max(0, firstCol - view.cols);
+    const ce = Math.min(cols, firstCol + 2 * view.cols);
+    winRowStart = rs;
+    winColStart = cs;
+    winRows = Math.max(0, re - rs);
+    winCols = Math.max(0, ce - cs);
+
+    instanceCount = winRows * winCols;
+    instData = new Float32Array(instanceCount * 6);
+    let idx = 0;
+    for (let r = rs; r < re; r++) {
+      for (let c = cs; c < ce; c++) {
+        const { ch, color } = cellForFn(r, c);
+        instData.set([c - cs, r - rs, color[0], color[1], color[2], glyphIndexFor(ch)], idx * 6);
+        idx++;
       }
     }
     gl.bindBuffer(gl.ARRAY_BUFFER, instBuf);
     gl.bufferData(gl.ARRAY_BUFFER, instData, gl.DYNAMIC_DRAW);
+    gl.useProgram(prog);
+    gl.uniform2f(uni.windowOrigin, winColStart, winRowStart);
+    markDirty();
+  }
+
+  function windowNeedsRebuild() {
+    const view = viewCells();
+    const firstRow = Math.max(0, Math.floor(currentScrollY / (CELL_H * dpr)));
+    const firstCol = Math.max(0, Math.floor(currentScrollX / (CELL_W * dpr)));
+    const lastRow = Math.min(rows, firstRow + view.rows);
+    const lastCol = Math.min(cols, firstCol + view.cols);
+    const halfR = view.rows / 2,
+      halfC = view.cols / 2;
+    // rebuild when the viewport leaves the window's middle band,
+    // unless the window is already pinned to that data edge
+    if (winRowStart > 0 && firstRow < winRowStart + halfR) return true;
+    if (winRowStart + winRows < rows && lastRow > winRowStart + winRows - halfR) return true;
+    if (winColStart > 0 && firstCol < winColStart + halfC) return true;
+    if (winColStart + winCols < cols && lastCol > winColStart + winCols - halfC) return true;
+    return false;
   }
   buildInstanceData();
 
@@ -3797,8 +3904,8 @@ function initAlignmentRenderer(canvas, alignPanel, spacer, config) {
     const y = (clientY - rect.top) * dpr + currentScrollY;
     const col = Math.floor(x / (CELL_W * dpr));
     const row = Math.floor(y / (CELL_H * dpr));
-    if (row < 0 || row >= rows || col < 0 || col >= cols) return -1;
-    return row * cols + col;
+    if (row < 0 || row >= rows || col < 0 || col >= cols) return null;
+    return { row, col };
   }
   function colFromClientX(clientX) {
     const rect = canvas.getBoundingClientRect();
@@ -3812,6 +3919,7 @@ function initAlignmentRenderer(canvas, alignPanel, spacer, config) {
     const hi = Math.max(selStartCol, selEndCol);
     gl.uniform1f(uni.selStart, lo);
     gl.uniform1f(uni.selEnd, hi);
+    markDirty();
     if (config.onSelectionChange) config.onSelectionChange(lo, hi);
   }
   function clearSelection() {
@@ -3820,6 +3928,7 @@ function initAlignmentRenderer(canvas, alignPanel, spacer, config) {
     gl.useProgram(prog);
     gl.uniform1f(uni.selStart, -1);
     gl.uniform1f(uni.selEnd, -1);
+    markDirty();
     if (config.onSelectionChange) config.onSelectionChange(-1, -1);
   }
 
@@ -3849,23 +3958,25 @@ function initAlignmentRenderer(canvas, alignPanel, spacer, config) {
   }
 
   canvas.addEventListener("mousemove", (e) => {
-    const newIdx = pickCell(e.clientX, e.clientY);
-    if (newIdx !== hoveredIdx) {
-      if (hoveredIdx >= 0) instData[hoveredIdx * 7 + 5] = 0;
-      if (newIdx >= 0) instData[newIdx * 7 + 5] = 1;
-      hoveredIdx = newIdx;
-      gl.bindBuffer(gl.ARRAY_BUFFER, instBuf);
-      gl.bufferData(gl.ARRAY_BUFFER, instData, gl.DYNAMIC_DRAW);
-      if (newIdx >= 0 && config.onHover) config.onHover(cellIndex[newIdx].row, cellIndex[newIdx].col);
-      else if (newIdx < 0 && config.onHoverEnd) config.onHoverEnd();
+    const cell = pickCell(e.clientX, e.clientY);
+    const newKey = cell ? cell.row * cols + cell.col : -1;
+    if (newKey !== hoveredKey) {
+      hoveredKey = newKey;
+      gl.useProgram(prog);
+      gl.uniform1f(uni.hoverCellCol, cell ? cell.col : -1);
+      gl.uniform1f(uni.hoverCellRow, cell ? cell.row : -1);
+      markDirty();
+      if (cell && config.onHover) config.onHover(cell.row, cell.col);
+      else if (!cell && config.onHoverEnd) config.onHoverEnd();
     }
   });
   canvas.addEventListener("mouseleave", () => {
-    if (hoveredIdx >= 0) {
-      instData[hoveredIdx * 7 + 5] = 0;
-      hoveredIdx = -1;
-      gl.bindBuffer(gl.ARRAY_BUFFER, instBuf);
-      gl.bufferData(gl.ARRAY_BUFFER, instData, gl.DYNAMIC_DRAW);
+    if (hoveredKey >= 0) {
+      hoveredKey = -1;
+      gl.useProgram(prog);
+      gl.uniform1f(uni.hoverCellCol, -1);
+      gl.uniform1f(uni.hoverCellRow, -1);
+      markDirty();
     }
     if (config.onHoverEnd) config.onHoverEnd();
   });
@@ -3875,30 +3986,32 @@ function initAlignmentRenderer(canvas, alignPanel, spacer, config) {
       closeContextMenu();
       return;
     }
-    const i = pickCell(e.clientX, e.clientY);
-    if (i < 0) return;
-    const cell = cellIndex[i];
-    if (!cell.record.charColors) cell.record.charColors = {};
-    const currentChar = cell.record.seq[cell.col] || "-";
-    const overrideHex = cell.record.charColors[cell.col];
-    const currentColorHex = overrideHex || rgbFloatToHex(config.getColor(cell.row, cell.col, currentChar));
+    const cellPos = pickCell(e.clientX, e.clientY);
+    if (!cellPos) return;
+    const record = config.getRecords()[cellPos.row];
+    if (!record.charColors) record.charColors = {};
+    const currentChar = record.seq[cellPos.col] || "-";
+    const overrideHex = record.charColors[cellPos.col];
+    const currentColorHex = overrideHex || rgbFloatToHex(config.getColor(cellPos.row, cellPos.col, currentChar));
     showCellEditPopup(
       e.clientX,
       e.clientY,
       currentChar,
       currentColorHex,
       (newChar, newColorHex) => {
-        let seq = cell.record.seq;
-        if (seq.length <= cell.col) seq = seq.padEnd(cell.col + 1, "-");
-        cell.record.seq = seq.substring(0, cell.col) + newChar + seq.substring(cell.col + 1);
-        cell.record.charColors[cell.col] = newColorHex;
-        applyColorOverrides([{ row: cell.row, col: cell.col, ch: newChar, color: hexToRgbFloat(newColorHex) }]);
-        config.onDataChanged(cell.col);
+        let seq = record.seq;
+        if (seq.length <= cellPos.col) seq = seq.padEnd(cellPos.col + 1, "-");
+        record.seq = seq.substring(0, cellPos.col) + newChar + seq.substring(cellPos.col + 1);
+        record.charColors[cellPos.col] = newColorHex;
+        applyColorOverrides([{ row: cellPos.row, col: cellPos.col, ch: newChar, color: hexToRgbFloat(newColorHex) }]);
+        config.onDataChanged(cellPos.col);
       },
       () => {
-        delete cell.record.charColors[cell.col];
-        const ch = cell.record.seq[cell.col] || "-";
-        applyColorOverrides([{ row: cell.row, col: cell.col, ch, color: config.getColor(cell.row, cell.col, ch) }]);
+        delete record.charColors[cellPos.col];
+        const ch = record.seq[cellPos.col] || "-";
+        applyColorOverrides([
+          { row: cellPos.row, col: cellPos.col, ch, color: config.getColor(cellPos.row, cellPos.col, ch) }
+        ]);
       }
     );
   });
@@ -4075,21 +4188,26 @@ function initAlignmentRenderer(canvas, alignPanel, spacer, config) {
     gl.bindTexture(gl.TEXTURE_2D, atlasTex);
     gl.bindVertexArray(vao);
     gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, instanceCount);
-    requestAnimationFrame(render);
   }
-  render();
+  function markDirty() {
+    requestRender(render);
+  }
+  markDirty();
 
   function applyColorOverrides(hitList) {
-    const colCount = config.getColCount();
     hitList.forEach(({ row, col, ch, color }) => {
-      const idx = row * colCount + col;
-      if (ch !== undefined) instData[idx * 7 + 6] = glyphIndexFor(ch);
-      instData[idx * 7 + 2] = color[0];
-      instData[idx * 7 + 3] = color[1];
-      instData[idx * 7 + 4] = color[2];
+      if (row < winRowStart || row >= winRowStart + winRows || col < winColStart || col >= winColStart + winCols) {
+        return; // off-window: the data model is already updated; the next window rebuild picks it up
+      }
+      const idx = (row - winRowStart) * winCols + (col - winColStart);
+      if (ch !== undefined) instData[idx * 6 + 5] = glyphIndexFor(ch);
+      instData[idx * 6 + 2] = color[0];
+      instData[idx * 6 + 3] = color[1];
+      instData[idx * 6 + 4] = color[2];
     });
     gl.bindBuffer(gl.ARRAY_BUFFER, instBuf);
     gl.bufferData(gl.ARRAY_BUFFER, instData, gl.DYNAMIC_DRAW);
+    markDirty();
   }
   return {
     onScroll(scrollTop, scrollLeft) {
@@ -4097,11 +4215,14 @@ function initAlignmentRenderer(canvas, alignPanel, spacer, config) {
       currentScrollX = scrollLeft * dpr;
       gl.useProgram(prog);
       gl.uniform2f(uni.scroll, currentScrollX, currentScrollY);
+      if (windowNeedsRebuild()) rebuildWindow();
+      else markDirty();
     },
     onResize() {
       sizeCanvasAndSpacer();
       gl.useProgram(prog);
       gl.uniform2f(uni.res, canvas.width, canvas.height);
+      rebuildWindow(); // viewport size changed, so the window must too
     },
     rebuildBuffer() {
       buildInstanceData();
@@ -4114,18 +4235,22 @@ function initAlignmentRenderer(canvas, alignPanel, spacer, config) {
       gl.useProgram(prog);
       gl.uniform2f(uni.cellSize, CELL_W * dpr, CELL_H * dpr);
       sizeCanvasAndSpacer();
+      rebuildWindow();
     },
     setLuminance(val) {
       gl.useProgram(prog);
       gl.uniform1f(uni.luminance, val);
+      markDirty();
     },
     setHoverCol(col) {
       gl.useProgram(prog);
       gl.uniform1f(uni.hoverCol, col);
+      markDirty();
     },
     setHoverRow(row) {
       gl.useProgram(prog);
       gl.uniform1f(uni.hoverRow, row);
+      markDirty();
     }
   };
 }
@@ -4540,8 +4665,8 @@ function createTab(name, records, presetState = null) {
     getLuminance,
     getColor: (r, c, ch) => getShadeColor(tabState, r, c, ch),
     getShadeMode: () => tabState.shadeMode,
-    setUniqueColCounts: (counts) => {
-      tabState.uniqueColCounts = counts;
+    recomputeUniqueColors: (cols) => {
+      tabState.uniqueColCounts = computeUniqueColumnColors(tabState, cols);
     },
     onDataChanged: (col) => {
       refreshConsensus();
@@ -4660,13 +4785,12 @@ function createTab(name, records, presetState = null) {
 
   // ---- Cross-track hover: highlight column in all tracks + info readout ----
   function handleHover(trackType, row, col) {
-    const colNum = col + 1;
-    let rowName = "";
-    if (trackType === "annotation") rowName = (tabState.annotations[row] && tabState.annotations[row].name) || "";
-    else if (trackType === "numbering") rowName = "Position";
-    else if (trackType === "alignment") rowName = (tabState.records[row] && tabState.records[row].header) || "";
-    else if (trackType === "consensus") rowName = "Consensus";
-    hoverInfoEl.textContent = `Col ${colNum} \u2014 ${rowName}`;
+    let rowLabel;
+    if (trackType === "alignment") rowLabel = `seq ${row + 1}`;
+    else if (trackType === "annotation") rowLabel = `ann ${row + 1}`;
+    else if (trackType === "numbering") rowLabel = "position";
+    else rowLabel = "consensus";
+    hoverInfoEl.textContent = `(${rowLabel}, col ${col + 1})`;
     allTrackCtls.forEach((ctl) => ctl.setHoverCol(col));
     alignmentCtl.setHoverRow(trackType === "alignment" ? row : -1);
   }
