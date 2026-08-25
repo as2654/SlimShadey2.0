@@ -1734,6 +1734,7 @@ function showColumnContextMenu(
   window._activeContextMenuClearSelection = onClearSelection;
   const menu = document.createElement("div");
   menu.className = "context-menu";
+  menu.style.visibility = "hidden";
   menu.style.left = `${x}px`;
   menu.style.top = `${y}px`;
 
@@ -1781,6 +1782,9 @@ function showColumnContextMenu(
   );
 
   document.body.appendChild(menu);
+  menu.style.left = Math.max(4, x - menu.offsetWidth) + "px";
+  menu.style.top = Math.max(4, y - menu.offsetHeight) + "px";
+  menu.style.visibility = "";
   window._activeContextMenu = menu;
   const docHandler = (ev) => {
     if (!menu.contains(ev.target)) closeContextMenu();
@@ -1828,6 +1832,7 @@ function showCellEditPopup(x, y, currentChar, currentColorHex, onApply, onResetC
   });
   menu.appendChild(applyBtn);
   document.body.appendChild(menu);
+  menu.style.left = Math.max(4, x - menu.offsetWidth) + "px";
   menu.style.top = Math.max(4, y - menu.offsetHeight) + "px";
   menu.style.visibility = "";
   window._activeContextMenu = menu;
