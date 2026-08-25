@@ -44,7 +44,7 @@ You can use SlimShadey 2.0 by visiting [SlimShadey](https://slimshadey.adsbio.ne
 
 No build step is required. Clone the repository and open `index.html` in a browser, or serve the directory with any static file server.
 
-Alignments load from FASTA files or from the bundled example datasets.
+Alignments load from FASTA files, shareable .slim format project files, or from the bundled example datasets.
 
 ## License
 
