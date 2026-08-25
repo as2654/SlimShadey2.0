@@ -695,7 +695,19 @@ const NUCLEOTIDE_ALPHABET = [
   { code: "T", name: "Thymidine", hex: "#A0FFA0" },
   { code: "G", name: "Guanosine", hex: "#FF7070" },
   { code: "C", name: "Cytosine", hex: "#FF8C4B" },
+  { code: "U", name: "Uridine", hex: "#B8B8B8" },
+  { code: "R", name: "purine (A/G)", hex: "#D088B8", degenerate: true },
+  { code: "Y", name: "pyrimidine (C/T)", hex: "#D0C676", degenerate: true },
+  { code: "S", name: "strong (G/C)", hex: "#FF7E5E", degenerate: true },
+  { code: "W", name: "weak (A/T)", hex: "#A0D0D0", degenerate: true },
+  { code: "K", name: "keto (G/T)", hex: "#D0B888", degenerate: true },
+  { code: "M", name: "amino (A/C)", hex: "#D096A5", degenerate: true },
+  { code: "B", name: "not A (C/G/T)", hex: "#DFA974", degenerate: true },
+  { code: "D", name: "not C (A/G/T)", hex: "#C0B0B0", degenerate: true },
+  { code: "H", name: "not G (A/C/T)", hex: "#C0B9A3", degenerate: true },
+  { code: "V", name: "not T (A/C/G)", hex: "#DF8993", degenerate: true },
   { code: "N", name: "ANY", hex: "#FFFFFF" },
+  { code: "X", name: "unknown", hex: "#FFFFFF" },
   { code: "-", name: "gap", hex: "#FFFFFF" }
 ];
 
@@ -713,11 +725,13 @@ const PROTEIN_ALPHABET = [
   { code: "L", name: "LEU", hex: "#0F820F" },
   { code: "M", name: "MET", hex: "#E6E600" },
   { code: "N", name: "ASN", hex: "#00DCDC" },
+  { code: "O", name: "PYL", hex: "#145AFF" },
   { code: "P", name: "PRO", hex: "#DC9682" },
   { code: "Q", name: "GLN", hex: "#00DCDC" },
   { code: "R", name: "ARN", hex: "#145AFF" },
   { code: "S", name: "SER", hex: "#FA9600" },
   { code: "T", name: "THR", hex: "#FA9600" },
+  { code: "U", name: "SEC", hex: "#E6E600" },
   { code: "V", name: "VAL", hex: "#0F820F" },
   { code: "W", name: "TRP", hex: "#B45AB4" },
   { code: "Y", name: "TYR", hex: "#3232AA" },
@@ -744,7 +758,28 @@ function getColorForChar(tabState, ch) {
   return map[ch.toUpperCase()] || [0.5, 0.5, 0.5];
 }
 function detectAlphabet(records) {
-  const nucChars = new Set(["A", "C", "G", "T", "U", "N", "-", ".", "*"]);
+  const nucChars = new Set([
+    "A",
+    "C",
+    "G",
+    "T",
+    "U",
+    "N",
+    "R",
+    "Y",
+    "S",
+    "W",
+    "K",
+    "M",
+    "B",
+    "D",
+    "H",
+    "V",
+    "X",
+    "-",
+    ".",
+    "*"
+  ]);
   for (const rec of records) {
     for (const ch of rec.seq.toUpperCase()) {
       if (!nucChars.has(ch)) return "protein";
@@ -790,7 +825,18 @@ const NUCLEOTIDE_CATEGORY = {
   C: "pyrimidine",
   T: "pyrimidine",
   U: "pyrimidine",
-  N: "special"
+  R: "purine",
+  Y: "pyrimidine",
+  S: "special",
+  W: "special",
+  K: "special",
+  M: "special",
+  B: "special",
+  D: "special",
+  H: "special",
+  V: "special",
+  N: "special",
+  X: "special"
 };
 function categoryFor(tabState, ch) {
   const map = tabState.alphabet === "nucleotide" ? NUCLEOTIDE_CATEGORY : RESIDUE_CATEGORY;
@@ -2009,11 +2055,15 @@ function renderAlignmentPng(tabState, colCount, resolveSeqColor, resolveAnnoColo
   const seqNum = tabState.records.length;
   const setsOfRows = Math.max(1, Math.ceil(colCount / columnsPerRow));
 
-  // Browsers cap canvas bitmap dimensions; stay well under them.
-  const MAX_DIM = 8000;
+  // Browser canvas bitmap floors: 32,767px per edge (Firefox/old Chrome),
+  // ~268M px total area (Chrome/desktop Safari). Chunks split by height,
+  // so width must always fit on its own; the row cap enforces both limits.
+  const MAX_DIM = 32767;
+  const MAX_AREA = 268435456;
   const logicalW = rowChars * cellW + margin * 2;
   if (logicalW * scale > MAX_DIM) return null; // too wide; caller alerts
-  const maxRowsPerCanvas = Math.max(1, Math.floor((MAX_DIM / scale - margin * 2) / cellH));
+  const maxBitmapHeight = Math.min(MAX_DIM, Math.floor(MAX_AREA / (logicalW * scale)));
+  const maxRowsPerCanvas = Math.max(1, Math.floor((maxBitmapHeight / scale - margin * 2) / cellH));
 
   function blockRowCount(lo, hi) {
     let n = (showNumbering ? 1 : 0) + seqNum + (showConsensus ? 1 : 0) + 1;
@@ -2841,6 +2891,8 @@ function showPrintPreviewModal(tabState, colCount, resolveSeqColor, resolveAnnoC
 }
 
 function showPngPreviewWindow(canvases, baseName) {
+  const MAX_EDGE = 32767;
+  const MAX_AREA = 268435456;
   const overlay = document.createElement("div");
   overlay.className = "modal-overlay";
   const box = document.createElement("div");
@@ -2861,18 +2913,35 @@ function showPngPreviewWindow(canvases, baseName) {
   btnRow.className = "shade-row";
   const saveBtn = document.createElement("button");
   saveBtn.textContent = "Save as PNG";
-  saveBtn.className = "modal-close-btn";
   saveBtn.addEventListener("click", () => {
-    canvases.forEach((c, i) => {
-      c.toBlob((blob) => {
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement("a");
-        a.href = url;
-        a.download = canvases.length === 1 ? `${baseName}.png` : `${baseName}-${i + 1}.png`;
-        a.click();
-        URL.revokeObjectURL(url);
-      }, "image/png");
+    const gap = 8; // bitmap px between stitched chunks, matching the preview's marginBottom
+    const rawW = Math.max(...canvases.map((c) => c.width));
+    const rawH = canvases.reduce((sum, c) => sum + c.height, 0) + gap * (canvases.length - 1);
+    // if the stitch would exceed browser canvas limits, scale the whole sheet down
+    const f = Math.min(1, MAX_EDGE / rawW, MAX_EDGE / rawH, Math.sqrt(MAX_AREA / (rawW * rawH)));
+    const combined = document.createElement("canvas");
+    combined.width = Math.floor(rawW * f);
+    combined.height = Math.floor(rawH * f);
+    const ctx = combined.getContext("2d");
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(0, 0, combined.width, combined.height);
+    let y = 0;
+    canvases.forEach((c) => {
+      ctx.drawImage(c, 0, Math.floor(y * f), Math.floor(c.width * f), Math.floor(c.height * f));
+      y += c.height + gap;
     });
+    combined.toBlob((blob) => {
+      if (!blob) {
+        alert("Could not encode the combined PNG — the image exceeds this browser's canvas limits.");
+        return;
+      }
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${baseName}.png`;
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(url), 2000);
+    }, "image/png");
   });
   const closeBtn = document.createElement("button");
   closeBtn.textContent = "Close";
@@ -2944,7 +3013,7 @@ function showSeqLogoOptionsModal(tabState, onGenerate) {
 function showSequenceLogoWindow(tabState, colCount, opts) {
   const { characterWidth, workingHeight, fontFamily, useError, colOffset = 0 } = opts;
   const alphaList = tabState.alphabet === "nucleotide" ? NUCLEOTIDE_ALPHABET : PROTEIN_ALPHABET;
-  const alphabetKeys = alphaList.map((e) => e.code);
+  const alphabetKeys = alphaList.filter((e) => !e.degenerate).map((e) => e.code);
   const alphabetSize = alphabetKeys.length;
 
   const colorMap = {};
@@ -3577,25 +3646,26 @@ function drawScaledGlyph(ctx, ch, x, y, targetWidth, targetHeight, colorHex, fon
 }
 
 function computeColumnLogoInfo(column, alphabetKeys, alphabetSize, useError) {
+  const keys = alphabetKeys.filter((k) => k !== "-"); // gaps are neither sampled nor drawn
   let sampleSize = 0;
   column.forEach((ch) => {
-    if (ch !== "-") sampleSize++;
+    sampleSize++;
   });
   const freq = {};
-  alphabetKeys.forEach((c) => {
+  keys.forEach((c) => {
     let count = 0;
     for (const ch of column) if (ch === c) count++;
     freq[c] = sampleSize > 0 ? count / sampleSize : 0;
   });
   let uncertainty = 0;
-  alphabetKeys.forEach((c) => {
+  keys.forEach((c) => {
     const f = freq[c];
     if (f > 0) uncertainty += f * Math.log2(f);
   });
   uncertainty = -uncertainty;
   const errest = useError && sampleSize > 0 ? ((1 / Math.LN2) * (alphabetSize - 1)) / (2 * sampleSize) : 0;
   let infoContent = Math.log2(alphabetSize) - (uncertainty + errest);
-  infoContent = Math.max(infoContent, 0);
+  infoContent = Math.max(0, Math.min(infoContent, Math.log2(alphabetSize))); // never above the axis max
   return { freq, infoContent };
 }
 
@@ -5291,7 +5361,10 @@ function createTab(name, records, presetState = null) {
           const cols = getColCount();
           const hits = [];
           for (let r = 0; r < rows; r++) {
+            const rec = tabState.records[r];
+            if (!rec.charColors) rec.charColors = {};
             for (let c = 0; c < cols; c++) {
+              rec.charColors[c] = "#FFFFFF";
               hits.push({ row: r, col: c, color: [1, 1, 1] });
             }
           }
@@ -5299,13 +5372,17 @@ function createTab(name, records, presetState = null) {
 
           const consensusHits = [];
           for (let c = 0; c < cols; c++) {
+            tabState.consensusColors[c] = "#FFFFFF";
             consensusHits.push({ row: 0, col: c, color: [1, 1, 1] });
           }
           consensusCtl.applyColorOverrides(consensusHits);
 
           const annotationHits = [];
           for (let r = 0; r < tabState.annotations.length; r++) {
+            const ann = tabState.annotations[r];
+            if (!ann.colors) ann.colors = {};
             for (let c = 0; c < cols; c++) {
+              ann.colors[c] = "#FFFFFF";
               annotationHits.push({ row: r, col: c, color: [1, 1, 1] });
             }
           }
