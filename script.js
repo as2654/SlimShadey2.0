@@ -802,77 +802,112 @@ function computeFrequencyColumns(tabState, colCount) {
   const alphaList = tabState.alphabet === "nucleotide" ? NUCLEOTIDE_ALPHABET : PROTEIN_ALPHABET;
   const residueKeys = alphaList.map((e) => e.code).filter((c) => c !== "-");
   const categoryOrder = [];
+  const catOf = {}; // category per residue char, resolved once per rebuild
   residueKeys.forEach((c) => {
     const cat = categoryFor(tabState, c);
+    catOf[c] = cat;
     if (cat && !categoryOrder.includes(cat)) categoryOrder.push(cat);
   });
 
   const cfg = tabState.shadeConfig.frequency;
-  const seqNum = tabState.records.length;
-  const columns = [];
+  const records = tabState.records;
+  const seqNum = records.length;
 
+  // colors parsed once per rebuild; level order pre-inverted when inverse is on
+  // (inverse maps level L -> 2-L, i.e. the reversed palette)
+  const identityRgb = hexToRgbFloat(cfg.identityHex);
+  const similarRgb = hexToRgbFloat(cfg.similarHex);
+  const diffRgb = hexToRgbFloat(cfg.diffHex);
+  const white = [1, 1, 1];
+  const levelColors = cfg.inverse ? [identityRgb, similarRgb, diffRgb] : [diffRgb, similarRgb, identityRgb];
+
+  // Phase 1: count residues and categories per column. Row-major, so string
+  // access is sequential and toUpperCase() runs once per row, not per cell.
+  // Missing chars in short rows counted as "-" before, and "-" contributes
+  // nothing to either count, so they're simply skipped here.
+  const residueCounts = new Array(colCount);
+  const categoryCounts = new Array(colCount);
   for (let c = 0; c < colCount; c++) {
-    const residueCounts = {};
+    const rc = {};
     residueKeys.forEach((r) => {
-      residueCounts[r] = 0;
+      rc[r] = 0;
     });
-    const categoryCounts = {};
+    residueCounts[c] = rc;
+    const cc = {};
     categoryOrder.forEach((cat) => {
-      categoryCounts[cat] = 0;
+      cc[cat] = 0;
     });
-
-    for (let k = 0; k < seqNum; k++) {
-      const ch = (tabState.records[k].seq[c] || "-").toUpperCase();
-      if (residueCounts[ch] !== undefined) residueCounts[ch]++;
-      const cat = categoryFor(tabState, ch);
-      if (cat && categoryCounts[cat] !== undefined) categoryCounts[cat]++;
+    categoryCounts[c] = cc;
+  }
+  for (let k = 0; k < seqNum; k++) {
+    const seq = records[k].seq.toUpperCase();
+    const n = Math.min(seq.length, colCount);
+    for (let c = 0; c < n; c++) {
+      const ch = seq[c];
+      const rc = residueCounts[c];
+      if (rc[ch] !== undefined) {
+        rc[ch]++;
+        const cat = catOf[ch];
+        if (cat) categoryCounts[c][cat]++;
+      }
     }
+  }
+
+  // Phase 2: per column, decide dominants once, then precompute char -> color
+  // for the whole alphabet. `_def` covers any char not in the alphabet
+  // (e.g. "U" in protein mode, "."), which the old logic shaded as "diff".
+  const columns = new Array(colCount);
+  for (let c = 0; c < colCount; c++) {
+    const rc = residueCounts[c];
+    const cc = categoryCounts[c];
 
     let dominantChar = null;
     for (const r of residueKeys) {
-      const freq = seqNum > 0 ? residueCounts[r] / seqNum : 0;
+      const freq = seqNum > 0 ? rc[r] / seqNum : 0;
       if (freq > cfg.threshold || (freq === 1 && seqNum > 2)) {
         dominantChar = r;
         break;
       }
     }
-
     let dominantCategory = null;
     for (const cat of categoryOrder) {
-      const freq = seqNum > 0 ? categoryCounts[cat] / seqNum : 0;
+      const freq = seqNum > 0 ? cc[cat] / seqNum : 0;
       if (freq > cfg.threshold || (freq === 1 && seqNum > 2)) {
         dominantCategory = cat;
         break;
       }
     }
 
-    columns.push({ dominantChar, dominantCategory });
+    const hasDominant = dominantChar !== null || dominantCategory !== null;
+    const refCat = dominantChar !== null ? catOf[dominantChar] : null;
+    const colColors = { "-": white, _def: hasDominant ? levelColors[0] : white };
+
+    alphaList.forEach((entry) => {
+      const code = entry.code;
+      if (code === "-") return;
+      let level = 0;
+      if (dominantChar !== null) {
+        if (code === dominantChar) level = 2;
+        else if (refCat !== null && catOf[code] === refCat) level = 1;
+      } else if (dominantCategory !== null) {
+        level = catOf[code] === dominantCategory ? 1 : 0;
+      }
+      const color = hasDominant ? levelColors[level] : white;
+      colColors[code] = color;
+      const lower = code.toLowerCase();
+      if (lower !== code) colColors[lower] = color;
+    });
+
+    columns[c] = colColors;
   }
   return columns;
 }
+
 function computeFrequencyShadeColor(tabState, row, col, ch) {
-  const info = tabState.frequencyColumns && tabState.frequencyColumns[col];
-  if (!info) return null;
-  const upper = ch.toUpperCase();
-  if (upper === "-") return null;
-
-  const cfg = tabState.shadeConfig.frequency;
-  let level;
-  if (info.dominantChar !== null) {
-    const ref1 = categoryFor(tabState, info.dominantChar);
-    if (upper === info.dominantChar) level = 2;
-    else if (ref1 !== null && categoryFor(tabState, upper) === ref1) level = 1;
-    else level = 0;
-  } else if (info.dominantCategory !== null) {
-    level = categoryFor(tabState, upper) === info.dominantCategory ? 1 : 0;
-  } else {
-    return null;
-  }
-
-  if (cfg.inverse) level = 2 - level;
-  if (level === 2) return hexToRgbFloat(cfg.identityHex);
-  if (level === 1) return hexToRgbFloat(cfg.similarHex);
-  return hexToRgbFloat(cfg.diffHex);
+  const colMap = tabState.frequencyColumns && tabState.frequencyColumns[col];
+  if (!colMap) return [1, 1, 1];
+  const c = colMap[ch];
+  return c !== undefined ? c : colMap._def;
 }
 
 function matrixColorFor(a, b, matchRgb, mismatchRgb, matrixName) {
@@ -886,40 +921,85 @@ function matrixColorFor(a, b, matchRgb, mismatchRgb, matrixName) {
   return lerpColor(mismatchRgb, matchRgb, t);
 }
 
-function computeMatrixShadeColor(tabState, row, col, ch) {
+function computeMatrixShadeCache(tabState, colCount) {
   const cfg = tabState.shadeConfig.matrix;
+  const matrixName = cfg.matrixName || "BLOSUM62";
   const matchRgb = hexToRgbFloat(cfg.matchHex);
   const mismatchRgb = hexToRgbFloat(cfg.mismatchHex);
-  const matrixName = cfg.matrixName || "BLOSUM62";
-  let toUse = null;
+  const white = [1, 1, 1];
+  const records = tabState.records;
+  const rowCount = records.length;
+  const alphaList = tabState.alphabet === "nucleotide" ? NUCLEOTIDE_ALPHABET : PROTEIN_ALPHABET;
+
+  // 1. Resolve the reference char for every column, once per rebuild.
+  const colRef = new Array(colCount);
   let refIndex = -1;
   if (cfg.mode === "sequence") {
-    refIndex = tabState.records.findIndex((r) => r.id === cfg.refSeqId);
-    if (refIndex === -1) refIndex = 0;
-    toUse = (tabState.records[refIndex].seq[col] || "-").toUpperCase();
+    let idx = records.findIndex((r) => r.id === cfg.refSeqId);
+    if (idx === -1) idx = 0;
+    if (rowCount > 0) refIndex = idx;
+    const refSeq = refIndex >= 0 ? records[refIndex].seq.toUpperCase() : "";
+    for (let c = 0; c < colCount; c++) {
+      const ch = c < refSeq.length ? refSeq[c] : "-";
+      colRef[c] = ch === "-" || ch === "." ? null : ch; // gap ref -> white column
+    }
   } else {
-    const counts = {};
-    tabState.records.forEach((rec) => {
-      const c2 = (rec.seq[col] || "-").toUpperCase();
-      counts[c2] = (counts[c2] || 0) + 1;
-    });
-    const total = tabState.records.length;
-    let maxFreq = 0,
-      maxChar = null;
-    Object.entries(counts).forEach(([c2, cnt]) => {
-      const freq = cnt / total;
-      if (freq > maxFreq) {
-        maxFreq = freq;
-        maxChar = c2;
+    for (let c = 0; c < colCount; c++) {
+      const counts = {};
+      for (let r = 0; r < rowCount; r++) {
+        const seq = records[r].seq;
+        const ch = c < seq.length ? seq[c].toUpperCase() : "-";
+        counts[ch] = (counts[ch] || 0) + 1;
       }
-    });
-    toUse = maxFreq > cfg.frequency ? maxChar : null;
+      let maxFreq = 0,
+        maxChar = null;
+      Object.entries(counts).forEach(([ch, cnt]) => {
+        const freq = cnt / rowCount;
+        if (freq > maxFreq) {
+          maxFreq = freq;
+          maxChar = ch;
+        }
+      });
+      const ref = maxFreq > cfg.frequency ? maxChar : null;
+      colRef[c] = ref === "-" || ref === "." ? null : ref;
+    }
   }
-  if (toUse === null) return [1, 1, 1];
-  if (cfg.mode === "sequence" && row === refIndex && !cfg.shadeMaster) return [1, 1, 1];
-  return matrixColorFor(toUse, ch.toUpperCase(), matchRgb, mismatchRgb, matrixName);
+
+  // 2. Color table: for each distinct ref char, the color of every possible
+  //    cell char (alphabet-sized, computed once — not per cell).
+  const table = {};
+  new Set(colRef.filter(Boolean)).forEach((refCh) => {
+    const rowColors = { "-": white, ".": white };
+    alphaList.forEach((entry) => {
+      const color = matrixColorFor(refCh, entry.code, matchRgb, mismatchRgb, matrixName);
+      rowColors[entry.code] = color;
+      const lower = entry.code.toLowerCase();
+      if (lower !== entry.code) rowColors[lower] = color;
+    });
+    // unknown chars get the X-row color, mirroring getSubstitutionScore's fallback
+    if (!rowColors["X"]) rowColors["X"] = matrixColorFor(refCh, "X", matchRgb, mismatchRgb, matrixName);
+    rowColors["x"] = rowColors["X"];
+    table[refCh] = rowColors;
+  });
+
+  return { mode: cfg.mode, refIndex, colRef, table };
 }
 
+function computeMatrixShadeColor(tabState, row, col, ch) {
+  let cache = tabState.matrixCache;
+  if (!cache) {
+    // cold path (e.g. an export before any rebuild in this mode): build once
+    let colCount = 1;
+    for (const r of tabState.records) if (r.seq.length > colCount) colCount = r.seq.length;
+    cache = tabState.matrixCache = computeMatrixShadeCache(tabState, colCount);
+  }
+  const cfg = tabState.shadeConfig.matrix;
+  if (cache.mode === "sequence" && row === cache.refIndex && !cfg.shadeMaster) return [1, 1, 1];
+  const ref = cache.colRef[col];
+  if (ref == null) return [1, 1, 1];
+  const rowColors = cache.table[ref];
+  return (rowColors && (rowColors[ch] || rowColors["X"])) || [1, 1, 1];
+}
 function computeUniqueColumnColors(tabState, colCount) {
   const cfg = tabState.shadeConfig.unique;
   const records = tabState.records;
@@ -3839,6 +3919,9 @@ function initAlignmentRenderer(canvas, alignPanel, spacer, config) {
     if (config.getShadeMode() === "frequency" && config.recomputeFrequencyColumns) {
       config.recomputeFrequencyColumns(cols);
     }
+    if (config.getShadeMode() === "matrix" && config.recomputeMatrixColors) {
+      config.recomputeMatrixColors(cols);
+    }
     rebuildWindow();
   }
 
@@ -4315,7 +4398,8 @@ function createTab(name, records, presetState = null) {
     collapse: (presetState && presetState.collapse) || false,
     liveHover: presetState && presetState.liveHover !== undefined ? presetState.liveHover : true,
     refreshDelay: (presetState && presetState.refreshDelay) || 0,
-    uniqueColCounts: []
+    uniqueColCounts: [],
+    matrixCache: null
   };
 
   function setShadeMode(mode) {
@@ -4667,6 +4751,9 @@ function createTab(name, records, presetState = null) {
     getShadeMode: () => tabState.shadeMode,
     recomputeUniqueColors: (cols) => {
       tabState.uniqueColCounts = computeUniqueColumnColors(tabState, cols);
+    },
+    recomputeMatrixColors: (cols) => {
+      tabState.matrixCache = computeMatrixShadeCache(tabState, cols);
     },
     onDataChanged: (col) => {
       refreshConsensus();
