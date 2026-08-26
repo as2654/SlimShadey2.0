@@ -4150,7 +4150,7 @@ function initAlignmentRenderer(canvas, alignPanel, spacer, config) {
     if (!record.charColors) record.charColors = {};
     const currentChar = record.seq[cellPos.col] || "-";
     const overrideHex = record.charColors[cellPos.col];
-    const currentColorHex = overrideHex || rgbFloatToHex(config.getColor(cellPos.row, cellPos.col, currentChar));
+    const currentColorHex = overrideHex || "#FFFFFF";
     showCellEditPopup(
       e.clientX,
       e.clientY,
@@ -4676,7 +4676,7 @@ function createTab(name, records, presetState = null) {
       const overrideChar = tabState.consensusOverrides[c];
       const ch = overrideChar !== undefined ? overrideChar : consensusStr[c] || "-";
       const overrideHex = tabState.consensusColors[c];
-      const bgHex = overrideHex || rgbFloatToHex(getColorForChar(tabState, ch));
+      const bgHex = overrideHex || "#FFFFFF";
       newConsensusOverrides[c - lo] = ch;
       newConsensusColors[c - lo] = bgHex;
     }
@@ -4763,14 +4763,8 @@ function createTab(name, records, presetState = null) {
     cellForFn: (r, c) => {
       const overrideChar = tabState.consensusOverrides[c];
       const ch = overrideChar !== undefined ? overrideChar : consensusStr[c] || "-";
-
-      if (tabState.shadeMode === "standard") {
-        return { ch, color: getColorForChar(tabState, ch) };
-      }
-
       const overrideHex = tabState.consensusColors[c];
-      const color = overrideHex ? hexToRgbFloat(overrideHex) : getColorForChar(tabState, ch);
-      return { ch, color };
+      return { ch, color: overrideHex ? hexToRgbFloat(overrideHex) : [1, 1, 1] };
     },
     onEdit: (r, c, clientX, clientY) => {
       const overrideChar = tabState.consensusOverrides[c];
@@ -4835,7 +4829,7 @@ function createTab(name, records, presetState = null) {
       const ch =
         tabState.consensusOverrides[col] !== undefined ? tabState.consensusOverrides[col] : consensusStr[col] || "-";
       const overrideHex = tabState.consensusColors[col];
-      const color = overrideHex ? hexToRgbFloat(overrideHex) : getColorForChar(tabState, ch);
+      const color = overrideHex ? hexToRgbFloat(overrideHex) : [1, 1, 1];
       consensusCtl.applyColorOverrides([{ row: 0, col, ch, color }]);
       updateHScrollSpacer();
     },
@@ -4899,11 +4893,7 @@ function createTab(name, records, presetState = null) {
           {
             name: "(Consensus)",
             rowCount: 1,
-            getColor: (r, c) => {
-              const overrideChar = tabState.consensusOverrides[c];
-              const ch = overrideChar !== undefined ? overrideChar : consensusStr[c] || "-";
-              return tabState.consensusColors[c] || rgbFloatToHex(getColorForChar(tabState, ch));
-            },
+            getColor: (r, c) => tabState.consensusColors[c] || "#FFFFFF",
             setColor: (r, c, hex) => {
               tabState.consensusColors[c] = hex;
             },
@@ -5271,7 +5261,7 @@ function createTab(name, records, presetState = null) {
               const overrideChar = tabState.consensusOverrides[c];
               const ch = overrideChar !== undefined ? overrideChar : consensusStr[c] || "-";
               const overrideHex = tabState.consensusColors[c];
-              const bgHex = overrideHex || rgbFloatToHex(getColorForChar(tabState, ch));
+              const bgHex = overrideHex || "#FFFFFF";
               return { ch, bgHex };
             }
           );
@@ -5301,7 +5291,7 @@ function createTab(name, records, presetState = null) {
                   const overrideChar = tabState.consensusOverrides[c];
                   const ch = overrideChar !== undefined ? overrideChar : consensusStr[c] || "-";
                   const overrideHex = tabState.consensusColors[c];
-                  const bgHex = overrideHex || rgbFloatToHex(getColorForChar(tabState, ch));
+                  const bgHex = overrideHex || "#FFFFFF";
                   return { ch, bgHex };
                 },
                 opts
@@ -5335,7 +5325,7 @@ function createTab(name, records, presetState = null) {
               const overrideChar = tabState.consensusOverrides[c];
               const ch = overrideChar !== undefined ? overrideChar : consensusStr[c] || "-";
               const overrideHex = tabState.consensusColors[c];
-              const bgHex = overrideHex || rgbFloatToHex(getColorForChar(tabState, ch));
+              const bgHex = overrideHex || "#FFFFFF";
               return { ch, bgHex };
             },
             getTabDisplayName()
@@ -5409,6 +5399,16 @@ function createTab(name, records, presetState = null) {
         label: mark("standard") + "Standard",
         onClick: () => {
           shadeCtx.setShadeMode("standard");
+          const cols = getColCount();
+          const hits = [];
+          for (let c = 0; c < cols; c++) {
+            const overrideChar = tabState.consensusOverrides[c];
+            const ch = overrideChar !== undefined ? overrideChar : consensusStr[c] || "-";
+            const color = getColorForChar(tabState, ch);
+            tabState.consensusColors[c] = rgbFloatToHex(color);
+            hits.push({ row: 0, col: c, color });
+          }
+          consensusCtl.applyColorOverrides(hits);
         }
       },
       {
